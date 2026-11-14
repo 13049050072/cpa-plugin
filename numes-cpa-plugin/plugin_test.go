@@ -1,0 +1,284 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+)
+
+func TestParseStored(t *testing.T) {
+	sa, err := parseStored([]byte(`{"auth":{"accessToken":"sk-numes-v1-abc"},"account":{"uid":"u1"}}`))
+	if err != nil || sa.Auth.AccessToken != "sk-numes-v1-abc" {
+		t.Fatalf("nested %#v %v", sa, err)
+	}
+	sa, err = parseStored([]byte(`{"key":"sk-numes-v1-flat"}`))
+	if err != nil || sa.Auth.AccessToken != "sk-numes-v1-flat" {
+		t.Fatalf("key %#v %v", sa, err)
+	}
+	sa, err = parseStored([]byte(" sk-numes-v1-raw "))
+	if err != nil || sa.Auth.AccessToken != "sk-numes-v1-raw" {
+		t.Fatalf("raw %#v %v", sa, err)
+	}
+	if sa.Auth.Domain != gatewayBase {
+		t.Fatalf("domain = %q", sa.Auth.Domain)
+	}
+}
+
+func TestUIDFromKey(t *testing.T) {
+	if got := uidFromKey("sk-numes-v1-0123456789abcdef0123"); got != "456789abcdef0123" {
+		t.Fatalf("uid = %q", got)
+	}
+}
+
+func TestParseAuthSkipForeign(t *testing.T) {
+	body, err := handleParseAuth(mustJSON(pluginapi.AuthParseRequest{
+		FileName: "tokenharbor-1.json",
+		RawJSON:  []byte(`{"type":"tokenharbor","auth":{"accessToken":"thk_live_x"}}`),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	_ = json.Unmarshal(body, &env)
+	var resp pluginapi.AuthParseResponse
+	_ = json.Unmarshal(env.Result, &resp)
+	if resp.Handled {
+		t.Fatal("claimed tokenharbor file")
+	}
+}
+
+func TestParseAuthClaim(t *testing.T) {
+	body, err := handleParseAuth(mustJSON(pluginapi.AuthParseRequest{
+		FileName: "numes-abc.json",
+		RawJSON:  []byte(`{"key":"sk-numes-v1-abcdef1234567890"}`),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	_ = json.Unmarshal(body, &env)
+	var resp pluginapi.AuthParseResponse
+	_ = json.Unmarshal(env.Result, &resp)
+	if !resp.Handled || resp.Auth.ID != "" || resp.Auth.FileName != "numes-abc.json" {
+		t.Fatalf("%#v", resp)
+	}
+}
+
+func TestFreePrice(t *testing.T) {
+	if !isFreePrice("0", "0") {
+		t.Fatal("0/0 should be free")
+	}
+	if isFreePrice("0.00001", "0") {
+		t.Fatal("paid input should not be free")
+	}
+}
+
+func TestStaticModelsNonEmpty(t *testing.T) {
+	if len(staticModels) == 0 {
+		t.Fatal("no static models")
+	}
+	for _, m := range staticModels {
+		if m.ID == "" || m.ContextLength <= 0 {
+			t.Fatalf("bad model %#v", m)
+		}
+	}
+}
+
+func TestRewriteModel(t *testing.T) {
+	out := rewriteModel([]byte(`{"model":"x","stream":false}`), "deepseek/deepseek-v4.1-flash", true)
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["model"] != "deepseek/deepseek-v4.1-flash" || m["stream"] != true {
+		t.Fatalf("%v", m)
+	}
+}
+
+func TestLiveExecute(t *testing.T) {
+	key := strings.TrimSpace(os.Getenv("NUMES_TEST_KEY"))
+	if key == "" {
+		t.Skip("set NUMES_TEST_KEY to run live calls")
+	}
+	sa := storedFromKey(key, "", "")
+	storage, _ := json.Marshal(sa)
+	req := executorRequestWire{ExecutorRequest: pluginapi.ExecutorRequest{
+		Model:           "deepseek/deepseek-v4.1-flash",
+		OriginalRequest: []byte(`{"model":"x","messages":[{"role":"user","content":"Say OK"}],"max_tokens":300}`),
+		StorageJSON:     storage,
+	}}
+	raw, err := handleExecExecute(mustJSON(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK {
+		t.Fatalf("envelope error: %+v", env.Error)
+	}
+	var resp pluginapi.ExecutorResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(resp.Payload) || !strings.Contains(string(resp.Payload), "choices") {
+		t.Fatalf("unexpected payload: %.200s", resp.Payload)
+	}
+	st := getStats(sa.Account.UID)
+	if st.Total == 0 {
+		t.Fatal("request not counted")
+	}
+	if st.TokensTotal == 0 {
+		t.Fatalf("tokens not counted: %+v", st)
+	}
+	t.Logf("counted: requests=%d tokens=%d errors=%d", st.Total, st.TokensTotal, st.Errors)
+}
+
+func TestLiveModels(t *testing.T) {
+	key := strings.TrimSpace(os.Getenv("NUMES_TEST_KEY"))
+	if key == "" {
+		t.Skip("set NUMES_TEST_KEY to run live calls")
+	}
+	sa := storedFromKey(key, "", "")
+	models := fetchModels(sa, "")
+	if len(models) == 0 {
+		t.Fatal("no models returned")
+	}
+	free := 0
+	for _, m := range models {
+		if m.ID == "" || m.ContextLength <= 0 {
+			t.Fatalf("bad model %#v", m)
+		}
+		free++
+	}
+	t.Logf("models=%d", free)
+}
+
+func TestBumpStats(t *testing.T) {
+	uid := "test-stats-" + time.Now().Format("150405.000000")
+	bump(uid)
+	bump(uid)
+	bumpError(uid)
+	s := getStats(uid)
+	if s.Total != 2 || s.Today != 2 || s.Errors != 1 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestAddTokens(t *testing.T) {
+	uid := "test-tokens-" + time.Now().Format("150405.000000")
+	bump(uid)
+	addTokens(uid, usageBlock{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15})
+	addTokens(uid, usageBlock{PromptTokens: 3, CompletionTokens: 2})
+	st := getStats(uid)
+	if st.TokensTotal != 20 || st.TokensToday != 20 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestTokensFromBody(t *testing.T) {
+	body := []byte(`{"choices":[],"usage":{"prompt_tokens":36,"completion_tokens":12,"total_tokens":48}}`)
+	u := tokensFromBody(body)
+	if u.TotalTokens != 48 || u.PromptTokens != 36 || u.CompletionTokens != 12 {
+		t.Fatalf("%+v", u)
+	}
+	if got := tokensFromBody([]byte(`{"error":1}`)); got.TotalTokens != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestTokensFromFrame(t *testing.T) {
+	frame := []byte(`data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`)
+	u, ok := tokensFromFrame(frame)
+	if !ok || u.TotalTokens != 10 {
+		t.Fatalf("%+v %v", u, ok)
+	}
+	if _, ok := tokensFromFrame([]byte(`data: [DONE]`)); ok {
+		t.Fatal("DONE parsed as usage")
+	}
+	if _, ok := tokensFromFrame([]byte(`data: {"choices":[{"delta":{}}]}`)); ok {
+		t.Fatal("delta parsed as usage")
+	}
+}
+
+func TestLiveStreamTokens(t *testing.T) {
+	key := strings.TrimSpace(os.Getenv("NUMES_TEST_KEY"))
+	if key == "" {
+		t.Skip("set NUMES_TEST_KEY to run live calls")
+	}
+	sa := storedFromKey(key, "", "")
+	storage, _ := json.Marshal(sa)
+	before := getStats(sa.Account.UID).TokensTotal
+	req := executorRequestWire{ExecutorRequest: pluginapi.ExecutorRequest{
+		Model:           "deepseek/deepseek-v4.1-flash",
+		OriginalRequest: []byte(`{"model":"x","messages":[{"role":"user","content":"Say OK"}],"max_tokens":300,"stream":true}`),
+		StorageJSON:     storage,
+	}}
+	raw, err := handleExecStream(mustJSON(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK {
+		t.Fatalf("envelope error: %+v", env.Error)
+	}
+	var resp streamResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Chunks) == 0 || !strings.HasPrefix(strings.TrimSpace(string(resp.Chunks[0].Payload)), "{") {
+		t.Fatalf("expected bare JSON chunk: %.160s", string(resp.Chunks[0].Payload))
+	}
+	after := getStats(sa.Account.UID).TokensTotal
+	if after <= before {
+		t.Fatalf("stream tokens not counted: before=%d after=%d", before, after)
+	}
+	t.Logf("stream tokens counted: +%d", after-before)
+}
+
+func TestStatsPersistence(t *testing.T) {
+	old := statsPath
+	statsPath = t.TempDir() + "/stats.json"
+	defer func() { statsPath = old }()
+
+	uid := "persist-" + time.Now().Format("150405.000000")
+	bump(uid)
+	addTokens(uid, usageBlock{TotalTokens: 42})
+	saveStats()
+
+	statsMu.Lock()
+	statsData = map[string]*reqStats{}
+	statsMu.Unlock()
+	loadStats()
+
+	st := getStats(uid)
+	if st.Total != 1 || st.TokensTotal != 42 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestNormalizeFrame(t *testing.T) {
+	line := []byte(`data: {"choices":[{"delta":{"content":"hi"}}]}`)
+	bare, ok := normalizeFrame(line, "")
+	if !ok || !json.Valid(bare) || bytes.HasPrefix(bare, []byte("data:")) {
+		t.Fatalf("bare: %q %v", bare, ok)
+	}
+	pref, ok := normalizeFrame(line, "data: ")
+	if !ok || !bytes.HasPrefix(pref, []byte("data: ")) || !json.Valid(bytes.TrimPrefix(pref, []byte("data: "))) {
+		t.Fatalf("prefixed: %q %v", pref, ok)
+	}
+	for _, drop := range [][]byte{[]byte("data: [DONE]"), []byte(""), []byte(": keepalive"), []byte("data: not-json")} {
+		if _, ok := normalizeFrame(drop, ""); ok {
+			t.Fatalf("should drop %q", drop)
+		}
+	}
+}

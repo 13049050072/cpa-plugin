@@ -5,6 +5,7 @@ CLIProxyAPI plugins:
 | directory | site |
 |---|---|
 | `alysis-cpa-plugin` | https://alysiscode.com |
+| `numes-cpa-plugin` | https://numes.ai |
 | `tokenharbor-cpa-plugin` | https://tokenharbor.ai |
 | `toptools-cpa-plugin` | https://top-tools-ai.com |
 
