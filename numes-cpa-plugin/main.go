@@ -48,6 +48,7 @@ extern void cliproxyPluginShutdown(void);
 import "C"
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -92,29 +93,46 @@ type loginCtx struct {
 }
 
 var (
-	hostAPI     *C.cliproxy_host_api
-	loginStates sync.Map
+	hostAPI         *C.cliproxy_host_api
+	loginStates     sync.Map
+	bgCtx, bgCancel = context.WithCancel(context.Background())
+	bgWG            sync.WaitGroup
+	shutdownOnce    sync.Once
 )
 
 func init() {
+	bgWG.Add(1)
 	go func() {
+		defer bgWG.Done()
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
-		for range t.C {
-			saveStats()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-t.C:
+				saveStats()
+			}
 		}
 	}()
+	bgWG.Add(1)
 	go func() {
+		defer bgWG.Done()
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
-		for range t.C {
-			now := time.Now()
-			loginStates.Range(func(key, value any) bool {
-				if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
-					loginStates.Delete(key)
-				}
-				return true
-			})
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-t.C:
+				now := time.Now()
+				loginStates.Range(func(key, value any) bool {
+					if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
+						loginStates.Delete(key)
+					}
+					return true
+				})
+			}
 		}
 	}()
 }
@@ -165,7 +183,21 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() { saveStats() }
+func cliproxyPluginShutdown() {
+	shutdownOnce.Do(func() {
+		bgCancel()
+		done := make(chan struct{})
+		go func() {
+			bgWG.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+		saveStats()
+	})
+}
 
 func hostCall(method string, request []byte) ([]byte, error) {
 	if hostAPI == nil || hostAPI.call == nil {

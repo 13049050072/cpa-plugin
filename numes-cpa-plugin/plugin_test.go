@@ -282,3 +282,25 @@ func TestNormalizeFrame(t *testing.T) {
 		}
 	}
 }
+
+// Shutdown must cancel in-flight work and let every goroutine exit, otherwise
+// the host unloads the .so while goroutines still run (restart hangs / SIGSEGV).
+// Keep this last: it cancels bgCtx for the whole test binary.
+func TestShutdownStopsGoroutines(t *testing.T) {
+	cliproxyPluginShutdown()
+	select {
+	case <-bgCtx.Done():
+	default:
+		t.Fatal("bgCtx not canceled")
+	}
+	done := make(chan struct{})
+	go func() { bgWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("background goroutines still running after shutdown")
+	}
+	if _, err := os.Stat(statsPath); err != nil {
+		t.Fatalf("stats not flushed: %v", err)
+	}
+}

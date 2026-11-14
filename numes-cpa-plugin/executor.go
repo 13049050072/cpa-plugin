@@ -102,13 +102,15 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		return okEnvelope(streamResponse{Headers: headers, Chunks: streamChunksFromPayload(payload, prefix)})
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(bgCtx)
 	httpReq = httpReq.WithContext(ctx)
+	bgWG.Add(1)
 	go pumpStream(httpReq, cancel, req.StreamID, req.HostCallbackID, sa.Account.UID, prefix)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 
 func pumpStream(httpReq *http.Request, cancel context.CancelFunc, streamID, callbackID, uid, prefix string) {
+	defer bgWG.Done()
 	defer cancel()
 	defer streamClose(streamID)
 	stream, status, _, err := hostHTTPDoStreamWithCallback(httpReq, callbackID)
