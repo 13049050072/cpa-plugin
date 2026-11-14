@@ -283,6 +283,16 @@ func TestNormalizeFrame(t *testing.T) {
 	}
 }
 
+func TestProbeCacheHit(t *testing.T) {
+	key := "sk-numes-v1-cachetest"
+	probeCache.Lock()
+	probeCache.m[key] = probeResult{alive: true, detail: "ok", at: time.Now()}
+	probeCache.Unlock()
+	if pr := cachedProbe(key); !pr.alive || pr.detail != "ok" {
+		t.Fatalf("cache miss: %+v", pr)
+	}
+}
+
 // Shutdown must cancel in-flight work and let every goroutine exit, otherwise
 // the host unloads the .so while goroutines still run (restart hangs / SIGSEGV).
 // Keep this last: it cancels bgCtx for the whole test binary.

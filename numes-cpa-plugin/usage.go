@@ -3,54 +3,24 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
-type keyUsage struct {
-	Label           string   `json:"label"`
-	Name            string   `json:"name"`
-	BillingCurrency string   `json:"billing_currency"`
-	Disabled        bool     `json:"disabled"`
-	Limit           *float64 `json:"limit"`
-	LimitRemaining  *float64 `json:"limit_remaining"`
-	Usage           float64  `json:"usage"`
-	CreatedAt       string   `json:"created_at"`
-}
-
-// fetchKeyUsage reads per-key spend from GET /key. Free models report 0, so
-// this only proves the key is alive.
-func fetchKeyUsage(sa *storedAuth, callbackID string) (*keyUsage, error) {
-	resp, err := getJSON(gatewayBase+"/key", map[string]string{
-		"Authorization": "Bearer " + sa.Auth.AccessToken,
-	}, callbackID)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(resp.Body), 200))
-	}
-	var wrap struct {
-		Data *keyUsage `json:"data"`
-	}
-	if err := json.Unmarshal(resp.Body, &wrap); err != nil {
-		return nil, err
-	}
-	if wrap.Data == nil {
-		return nil, fmt.Errorf("unexpected /key response")
-	}
-	return wrap.Data, nil
-}
-
-// probeKey verifies a key by listing models. Numes returns 401 for a bad key.
-func probeKey(key, callbackID string) (bool, string) {
+// probeKey verifies a key by listing models. Numes returns 401/403 for a bad
+// key; any other failure (network, 429, 5xx) is transient and proves nothing.
+func probeKey(key, callbackID string) (alive, invalid bool, detail string) {
 	resp, err := getJSON(gatewayBase+"/models", map[string]string{"Authorization": "Bearer " + key}, callbackID)
 	if err != nil {
-		return false, err.Error()
+		return false, false, err.Error()
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return false, true, fmt.Sprintf("HTTP %d %s", resp.StatusCode, truncate(string(resp.Body), 160))
 	}
 	if resp.StatusCode >= 400 {
-		return false, fmt.Sprintf("HTTP %d %s", resp.StatusCode, truncate(string(resp.Body), 160))
+		return false, false, fmt.Sprintf("HTTP %d %s", resp.StatusCode, truncate(string(resp.Body), 160))
 	}
-	return true, "ok"
+	return true, false, "ok"
 }
 
 type usageBlock struct {

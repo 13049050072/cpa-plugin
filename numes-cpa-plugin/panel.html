@@ -108,14 +108,6 @@ async function api(path,opts={},retry=true){
   if(!r.ok)throw new Error(d.error||("HTTP "+r.status));
   return d;
 }
-function money(v){return typeof v==="number"?("$"+v.toFixed(4).replace(/0+$/,"").replace(/\.$/,"."+"")):esc(v)}
-function fmtNum(v){return typeof v==="number"?v.toFixed(4).replace(/0+$/,"").replace(/\.$/,""):"—"}
-function limitText(u){
-  if(!u)return "—";
-  if(u.limit==null)return "无限";
-  const rem=u.limit_remaining==null?"?":fmtNum(u.limit_remaining);
-  return rem+" / "+fmtNum(u.limit);
-}
 function num(v){return typeof v==="number"?v.toLocaleString():"—"}
 function lastSeen(ts){
   if(!ts)return "—";
@@ -135,7 +127,7 @@ function rowHTML(a){
     <td class="px-3 py-2">${num(l.tokens_today)}</td>
     <td class="px-3 py-2">${num(l.tokens_total)}</td>
     <td class="px-3 py-2 ${l.errors?'text-red-600':''}">${num(l.errors)}</td>
-    <td class="px-3 py-2">${a.disabled?'<span class="text-xs px-2 py-0.5 rounded bg-stone-200 dark:bg-stone-700">停用</span>':(a.alive===false?'<span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700">失效</span>':'<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">可用</span>')}</td>
+    <td class="px-3 py-2">${a.disabled?'<span class="text-xs px-2 py-0.5 rounded bg-stone-200 dark:bg-stone-700">停用</span>':(a.state==='invalid'?'<span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700">失效</span>':(a.state==='ok'?'<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">可用</span>':'<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">未知</span>'))}</td>
   </tr>`;
 }
 async function load(){
@@ -149,8 +141,8 @@ async function load(){
     await Promise.all(accs.map(async a=>{
       try{
         const u=await api("/usage",{method:"POST",body:JSON.stringify({auth_index:a.auth_index,login:true})});
-        a.local=u.local;a.alive=u.alive;
-      }catch(e){a.alive=false}
+        a.local=u.local;a.state=u.state||"unknown";
+      }catch(e){a.state="unknown"}
     }));
     rows.innerHTML=accs.map(rowHTML).join("");
   }catch(e){showErr(e.message)}

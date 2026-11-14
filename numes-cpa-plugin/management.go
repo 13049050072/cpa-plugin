@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -99,6 +101,40 @@ func handleAccounts() map[string]any {
 	return map[string]any{"accounts": accounts, "site": siteURL, "count": len(accounts)}
 }
 
+type probeResult struct {
+	alive   bool
+	invalid bool
+	detail  string
+	at      time.Time
+}
+
+// probeCache keeps conclusive probe results for a few minutes: the panel probes
+// every key on load, and re-probing all of them each time both stalls the page
+// and punts transient network errors into the "dead key" badge.
+var probeCache = struct {
+	sync.Mutex
+	m map[string]probeResult
+}{m: map[string]probeResult{}}
+
+const probeTTL = 5 * time.Minute
+
+func cachedProbe(key string) probeResult {
+	probeCache.Lock()
+	r, ok := probeCache.m[key]
+	probeCache.Unlock()
+	if ok && time.Since(r.at) < probeTTL {
+		return r
+	}
+	alive, invalid, detail := probeKey(key, "")
+	r = probeResult{alive: alive, invalid: invalid, detail: detail, at: time.Now()}
+	if alive || invalid {
+		probeCache.Lock()
+		probeCache.m[key] = r
+		probeCache.Unlock()
+	}
+	return r
+}
+
 func handleUsage(req managementRequestWire) map[string]any {
 	var body struct {
 		AuthIndex string `json:"auth_index"`
@@ -120,19 +156,22 @@ func handleUsage(req managementRequestWire) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
-	alive, detail := true, ""
-	if body.Login {
-		alive, detail = probeKey(sa.Auth.AccessToken, req.HostCallbackID)
-	}
 	out := map[string]any{
 		"auth_index": id,
 		"name":       name,
-		"alive":      alive,
-		"probe":      shortErr(detail),
 		"local":      getStats(sa.Account.UID),
 	}
-	if ku, err := fetchKeyUsage(sa, req.HostCallbackID); err == nil {
-		out["key"] = ku
+	if body.Login {
+		pr := cachedProbe(sa.Auth.AccessToken)
+		state := "unknown"
+		if pr.alive {
+			state = "ok"
+		} else if pr.invalid {
+			state = "invalid"
+		}
+		out["alive"] = pr.alive
+		out["state"] = state
+		out["probe"] = shortErr(pr.detail)
 	}
 	return out
 }
