@@ -296,3 +296,22 @@ func TestShutdownStopsGoroutines(t *testing.T) {
 		t.Fatalf("stats not flushed: %v", err)
 	}
 }
+
+func TestLiveBalance(t *testing.T) {
+	email := strings.TrimSpace(os.Getenv("FIFTYX_TEST_EMAIL"))
+	password := strings.TrimSpace(os.Getenv("FIFTYX_TEST_PASSWORD"))
+	if email == "" || password == "" {
+		t.Skip("set FIFTYX_TEST_EMAIL/FIFTYX_TEST_PASSWORD to run live billing")
+	}
+	sa := &storedAuth{}
+	sa.Account.Email = email
+	sa.Account.Password = password
+	snap := fetchBalance(sa)
+	if snap.Err != "" {
+		t.Fatalf("billing failed: %s", snap.Err)
+	}
+	if snap.BalanceUSD == "" {
+		t.Fatalf("empty balance: %#v", snap)
+	}
+	t.Logf("balance=%s tokens_today=%d", snap.BalanceUSD, snap.TokensToday)
+}

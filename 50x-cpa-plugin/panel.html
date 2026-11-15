@@ -25,12 +25,12 @@ tailwind.config={darkMode:'class',theme:{extend:{colors:{acc:'#7c5cff'}}}};
       <h1 class="text-xl font-semibold truncate">50x</h1>
       <p class="text-xs text-stone-500 dark:text-stone-400 truncate">
         <a class="text-sky-600 dark:text-sky-400 hover:underline" href="https://ai.50x.energy/dashboard" target="_blank" rel="noreferrer">dashboard</a>
-        · 请求数与 Token 由插件本地统计 · 免费模型 $0
+        · 请求数与 Token 本地统计 · 余额来自 /api/billing（10 分钟缓存）
       </p>
     </div>
     <div class="flex gap-2 shrink-0">
       <button type="button" class="px-3 py-1.5 rounded-lg bg-stone-200 dark:bg-stone-700 hover:bg-stone-300 dark:hover:bg-stone-600" onclick="openImport()">导入</button>
-      <button type="button" id="refreshBtn" class="px-3 py-1.5 rounded-lg bg-acc text-white hover:opacity-90 disabled:opacity-50" onclick="load()">刷新</button>
+      <button type="button" id="refreshBtn" class="px-3 py-1.5 rounded-lg bg-acc text-white hover:opacity-90 disabled:opacity-50" onclick="reload()">刷新</button>
     </div>
   </div>
 
@@ -50,6 +50,7 @@ tailwind.config={darkMode:'class',theme:{extend:{colors:{acc:'#7c5cff'}}}};
         <tr>
           <th class="px-3 py-2 font-medium">账号</th>
           <th class="px-3 py-2 font-medium">Key</th>
+          <th class="px-3 py-2 font-medium">余额</th>
           <th class="px-3 py-2 font-medium">今日请求</th>
           <th class="px-3 py-2 font-medium">累计请求</th>
           <th class="px-3 py-2 font-medium">今日 Token</th>
@@ -117,11 +118,18 @@ function lastSeen(ts){
   if(ms<86400000)return Math.round(ms/3600000)+"h 前";
   return Math.round(ms/86400000)+"d 前";
 }
+function balanceCell(b){
+  b=b||{};
+  if(!b.at)return '<span class="text-stone-400">—</span>';
+  if(!b.balance_usd)return `<span class="text-stone-400" title="${esc(b.error||"")}">—</span><div class="text-xs text-stone-500">${lastSeen(b.at)}</div>`;
+  return `<div class="font-mono">$${Number(b.balance_usd).toFixed(2)}</div><div class="text-xs text-stone-500">${lastSeen(b.at)} · 今日 ${num(b.tokens_used_today)} tok</div>`;
+}
 function rowHTML(a){
   const l=a.local||{};
   return `<tr class="align-top">
     <td class="px-3 py-2 min-w-0"><div class="font-medium truncate max-w-[200px]">${esc(a.email||a.nickname||a.uid||a.name||"key")}</div><div class="text-xs text-stone-500 truncate max-w-[200px]">${esc(a.auth_index)} · ${esc(lastSeen(l.last))}</div></td>
     <td class="px-3 py-2 font-mono text-xs">${esc(a.key_prefix||"")}</td>
+    <td class="px-3 py-2 whitespace-nowrap">${balanceCell(a.balance)}</td>
     <td class="px-3 py-2">${num(l.today)}</td>
     <td class="px-3 py-2">${num(l.total)}</td>
     <td class="px-3 py-2">${num(l.tokens_today)}</td>
@@ -130,6 +138,8 @@ function rowHTML(a){
     <td class="px-3 py-2">${a.disabled?'<span class="text-xs px-2 py-0.5 rounded bg-stone-200 dark:bg-stone-700">停用</span>':(a.state==='invalid'?'<span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700">失效</span>':(a.state==='ok'?'<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">可用</span>':'<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">未知</span>'))}</td>
   </tr>`;
 }
+let autoRetried=false;
+function reload(){autoRetried=false;load()}
 async function load(){
   const btn=document.getElementById("refreshBtn");btn.disabled=true;showErr("");
   try{
@@ -141,10 +151,12 @@ async function load(){
     await Promise.all(accs.map(async a=>{
       try{
         const u=await api("/usage",{method:"POST",body:JSON.stringify({auth_index:a.auth_index,login:true})});
-        a.local=u.local;a.state=u.state||"unknown";
+        a.local=u.local;a.state=u.state||"unknown";a.balance=u.balance;
       }catch(e){a.state="unknown"}
     }));
     rows.innerHTML=accs.map(rowHTML).join("");
+    // 余额是后台异步刷新的：首次打开先触发，6 秒后再拉一次拿结果
+    if(!autoRetried && accs.some(a=>!a.balance||!a.balance.at)){autoRetried=true;setTimeout(load,6000)}
   }catch(e){showErr(e.message)}
   finally{btn.disabled=false}
 }

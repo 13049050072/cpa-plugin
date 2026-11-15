@@ -139,6 +139,7 @@ func handleUsage(req managementRequestWire) map[string]any {
 	var body struct {
 		AuthIndex string `json:"auth_index"`
 		Login     bool   `json:"login"`
+		Refresh   bool   `json:"refresh"`
 	}
 	_ = json.Unmarshal(req.Body, &body)
 	id := strings.TrimSpace(body.AuthIndex)
@@ -160,6 +161,7 @@ func handleUsage(req managementRequestWire) map[string]any {
 		"auth_index": id,
 		"name":       name,
 		"local":      getStats(sa.Account.UID),
+		"balance":    balanceFor(sa, body.Refresh),
 	}
 	if body.Login {
 		pr := cachedProbe(sa.Auth.AccessToken)

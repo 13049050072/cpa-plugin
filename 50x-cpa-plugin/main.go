@@ -66,6 +66,7 @@ const (
 	pluginLogoURL = "https://ai.50x.energy/favicon.png"
 	siteURL       = "https://ai.50x.energy"
 	gatewayBase   = "https://api.ai.50x.energy/v1"
+	controlBase   = "https://api.ai.50x.energy/api"
 	keyPrefix     = "sk-50x-"
 	loginTTL      = 15 * time.Minute
 )
@@ -86,6 +87,8 @@ type storedAccount struct {
 	UID      string `json:"uid"`
 	Nickname string `json:"nickname"`
 	Email    string `json:"email,omitempty"`
+	Password string `json:"password,omitempty"`
+	Session  string `json:"session,omitempty"`
 }
 
 type loginCtx struct {

@@ -17,11 +17,15 @@ OpenAI-compatible, so the CPA executor forwards chat-completions payloads unchan
   "type": "50x",
   "provider": "50x",
   "auth": { "accessToken": "sk-50x-…" },
-  "account": { "uid": "…", "email": "…" }
+  "account": { "uid": "…", "email": "…", "password": "…", "session": "…" }
 }
 ```
 
 `accessToken` 也可以直接写成 `key` / `api_key`。面板「导入」粘贴 `sk-50x-…` 即可。
+
+`account.password` / `account.session` 只用于面板显示余额：`GET /api/billing`
+（控制面是 `Authorization: Token <session>`，API key 查不到账单）。session 失效时
+自动用邮箱+密码重新登录。没有这两项时余额显示 `—`，其余功能不受影响。
 
 ## 环境变量
 
