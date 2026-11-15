@@ -25,7 +25,7 @@ tailwind.config={darkMode:'class',theme:{extend:{colors:{acc:'#7c5cff'}}}};
       <h1 class="text-xl font-semibold truncate">50x</h1>
       <p class="text-xs text-stone-500 dark:text-stone-400 truncate">
         <a class="text-sky-600 dark:text-sky-400 hover:underline" href="https://ai.50x.energy/dashboard" target="_blank" rel="noreferrer">dashboard</a>
-        · 请求数与 Token 本地统计 · 余额来自 /api/billing（10 分钟缓存）
+        · 请求/token 本地统计 · 余额来自 /api/billing（点卡片刷新）
       </p>
     </div>
     <div class="flex gap-2 shrink-0">
@@ -44,31 +44,14 @@ tailwind.config={darkMode:'class',theme:{extend:{colors:{acc:'#7c5cff'}}}};
 
   <div id="err" class="hidden mb-3 rounded-lg bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 break-words"></div>
 
-  <div class="rounded-xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 overflow-x-auto">
-    <table class="w-full text-left min-w-[720px]">
-      <thead class="text-xs uppercase text-stone-500 border-b border-stone-200 dark:border-stone-700">
-        <tr>
-          <th class="px-3 py-2 font-medium">账号</th>
-          <th class="px-3 py-2 font-medium">Key</th>
-          <th class="px-3 py-2 font-medium">余额</th>
-          <th class="px-3 py-2 font-medium">今日请求</th>
-          <th class="px-3 py-2 font-medium">累计请求</th>
-          <th class="px-3 py-2 font-medium">今日 Token</th>
-          <th class="px-3 py-2 font-medium">累计 Token</th>
-          <th class="px-3 py-2 font-medium">错误</th>
-          <th class="px-3 py-2 font-medium">状态</th>
-        </tr>
-      </thead>
-      <tbody id="rows" class="divide-y divide-stone-100 dark:divide-stone-700/60"></tbody>
-    </table>
-    <div id="empty" class="hidden px-3 py-6 text-center text-stone-500">还没有 50x key，点「导入」粘贴 sk-50x-…</div>
-  </div>
+  <div id="summary" class="hidden mb-4 grid grid-cols-2 sm:grid-cols-4 gap-2 min-w-0"></div>
+  <div id="grid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 min-w-0"></div>
 </div>
 
 <div id="importModal" class="hidden fixed inset-0 z-50 items-center justify-center bg-black/40 p-4">
   <div class="w-full max-w-lg rounded-xl bg-white dark:bg-stone-800 p-4 shadow-xl">
     <h2 class="font-semibold mb-1">导入 API key</h2>
-    <p class="text-xs text-stone-500 mb-3">粘贴 sk-50x-… 或完整 auth JSON。</p>
+    <p class="text-xs text-stone-500 mb-3">粘贴 sk-50x-… 或完整 auth JSON（带 password/session 才能查余额）。</p>
     <textarea id="importText" rows="4" class="w-full rounded-lg border border-stone-200 dark:border-stone-600 bg-stone-50 dark:bg-stone-900 px-3 py-2 font-mono text-xs" placeholder="sk-50x-..."></textarea>
     <div id="importErr" class="hidden mt-2 text-xs text-red-600 break-words"></div>
     <div class="flex justify-end gap-2 mt-4">
@@ -110,6 +93,7 @@ async function api(path,opts={},retry=true){
   return d;
 }
 function num(v){return typeof v==="number"?v.toLocaleString():"—"}
+function money(v){const n=Number(v);return isFinite(n)?"$"+n.toFixed(2):"—"}
 function lastSeen(ts){
   if(!ts)return "—";
   const ms=Date.now()-ts*1000;
@@ -118,48 +102,99 @@ function lastSeen(ts){
   if(ms<86400000)return Math.round(ms/3600000)+"h 前";
   return Math.round(ms/86400000)+"d 前";
 }
-function balanceCell(b){
-  b=b||{};
-  if(!b.at)return '<span class="text-stone-400">—</span>';
-  if(!b.balance_usd)return `<span class="text-stone-400" title="${esc(b.error||"")}">—</span><div class="text-xs text-stone-500">${lastSeen(b.at)}</div>`;
-  return `<div class="font-mono">$${Number(b.balance_usd).toFixed(2)}</div><div class="text-xs text-stone-500">${lastSeen(b.at)} · 今日 ${num(b.tokens_used_today)} tok</div>`;
+
+// ---------------------------------------------------------------- 卡片
+function badge(a){
+  if(a.disabled)return ['停用','bg-stone-200 text-stone-600 dark:bg-stone-700 dark:text-stone-300'];
+  if(a.state==='invalid')return ['失效','bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200'];
+  if(a.state==='ok')return ['可用','bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200'];
+  return ['未知','bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200'];
 }
-function rowHTML(a){
-  const l=a.local||{};
-  return `<tr class="align-top">
-    <td class="px-3 py-2 min-w-0"><div class="font-medium truncate max-w-[200px]">${esc(a.email||a.nickname||a.uid||a.name||"key")}</div><div class="text-xs text-stone-500 truncate max-w-[200px]">${esc(a.auth_index)} · ${esc(lastSeen(l.last))}</div></td>
-    <td class="px-3 py-2 font-mono text-xs">${esc(a.key_prefix||"")}</td>
-    <td class="px-3 py-2 whitespace-nowrap">${balanceCell(a.balance)}</td>
-    <td class="px-3 py-2">${num(l.today)}</td>
-    <td class="px-3 py-2">${num(l.total)}</td>
-    <td class="px-3 py-2">${num(l.tokens_today)}</td>
-    <td class="px-3 py-2">${num(l.tokens_total)}</td>
-    <td class="px-3 py-2 ${l.errors?'text-red-600':''}">${num(l.errors)}</td>
-    <td class="px-3 py-2">${a.disabled?'<span class="text-xs px-2 py-0.5 rounded bg-stone-200 dark:bg-stone-700">停用</span>':(a.state==='invalid'?'<span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700">失效</span>':(a.state==='ok'?'<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">可用</span>':'<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">未知</span>'))}</td>
-  </tr>`;
+function tile(label,value,sub,cls){
+  return `<div class="rounded-lg bg-stone-100 dark:bg-stone-900/60 p-2 min-w-0">
+    <div class="text-[10px] text-stone-500 truncate">${esc(label)}</div>
+    <div class="text-base font-semibold tabular-nums truncate ${cls||''}">${value}</div>
+    <div class="text-[10px] text-stone-400 truncate">${esc(sub||'')}</div>
+  </div>`;
 }
-let autoRetried=false;
+function cardHTML(a){
+  const l=a.local||{}, b=a.balance||{};
+  const [lab,bcls]=badge(a);
+  const bal=b.balance_usd?money(b.balance_usd):'—';
+  return `<div class="text-left w-full min-w-0 overflow-hidden rounded-xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 p-4 cursor-pointer hover:border-[#7c5cff] transition-colors" data-id="${esc(a.auth_index)}" title="点击刷新余额">
+    <div class="flex items-start gap-2 min-w-0">
+      <div class="min-w-0 flex-1">
+        <div class="font-medium truncate" title="${esc(a.email||a.nickname||a.uid||a.name)}">${esc(a.email||a.nickname||a.uid||a.name||'key')}</div>
+        <div class="text-[11px] font-mono text-stone-500 truncate">${esc(a.key_prefix||'')}</div>
+      </div>
+      <span class="shrink-0 max-w-[40%] truncate text-[11px] font-semibold px-2 py-0.5 rounded-full ${bcls}">${lab}</span>
+    </div>
+    <div class="mt-3 grid grid-cols-3 gap-2 min-w-0">
+      ${tile('余额',bal,b.at?lastSeen(b.at):'点我刷新')}
+      ${tile('今日请求',num(l.today),'累计 '+num(l.total))}
+      ${tile('今日 Token',num(l.tokens_today),'累计 '+num(l.tokens_total))}
+    </div>
+    <div class="mt-2 flex items-center justify-between gap-2 text-[11px] text-stone-500 min-w-0">
+      <span class="truncate">最后使用 ${lastSeen(l.last)}</span>
+      <span class="shrink-0 ${l.errors?'text-rose-500':''}">错误 ${num(l.errors)}</span>
+    </div>
+    ${b.error?`<p class="mt-2 text-[11px] text-rose-500 break-words line-clamp-2" title="${esc(b.error)}">${esc(b.error)}</p>`:''}
+  </div>`;
+}
+
+let ACCOUNTS=[], autoRetried=false;
 function reload(){autoRetried=false;load()}
+
+function renderSummary(){
+  const box=document.getElementById("summary");
+  box.classList.remove("hidden");
+  const ok=ACCOUNTS.filter(a=>a.state==='ok'&&!a.disabled).length;
+  const withBal=ACCOUNTS.filter(a=>a.balance&&a.balance.balance_usd);
+  const total=withBal.reduce((s,a)=>s+Number(a.balance.balance_usd||0),0);
+  const today=ACCOUNTS.reduce((s,a)=>s+Number((a.local||{}).today||0),0);
+  box.innerHTML=[
+    ['账号',ACCOUNTS.length],
+    ['可用',ok],
+    ['总余额',withBal.length?money(total):'—'],
+    ['今日请求',today.toLocaleString()],
+  ].map(([k,v])=>`<div class="rounded-lg bg-stone-100 dark:bg-stone-800 p-3 min-w-0"><div class="text-[10px] text-stone-500">${k}</div><div class="text-lg font-semibold tabular-nums truncate">${v}</div></div>`).join('');
+}
+
+function renderGrid(){
+  const g=document.getElementById("grid");
+  if(!ACCOUNTS.length){g.innerHTML='<div class="col-span-full text-center text-stone-500 py-10">还没有 50x key，点「导入」粘贴 sk-50x-…</div>';return}
+  g.innerHTML=ACCOUNTS.map(cardHTML).join("");
+}
+
+async function fillOne(a,force){
+  try{
+    const u=await api("/usage",{method:"POST",body:JSON.stringify({auth_index:a.auth_index,login:true,refresh:!!force})});
+    a.local=u.local;a.state=u.state||"unknown";a.balance=u.balance;
+  }catch(e){a.state="unknown"}
+}
+
 async function load(){
   const btn=document.getElementById("refreshBtn");btn.disabled=true;showErr("");
   try{
     const d=await api("/accounts");
-    const accs=d.accounts||[];
-    const rows=document.getElementById("rows");
-    rows.innerHTML=accs.map(rowHTML).join("");
-    document.getElementById("empty").classList.toggle("hidden",accs.length>0);
-    await Promise.all(accs.map(async a=>{
-      try{
-        const u=await api("/usage",{method:"POST",body:JSON.stringify({auth_index:a.auth_index,login:true})});
-        a.local=u.local;a.state=u.state||"unknown";a.balance=u.balance;
-      }catch(e){a.state="unknown"}
-    }));
-    rows.innerHTML=accs.map(rowHTML).join("");
-    // 余额是后台异步刷新的：首次打开先触发，6 秒后再拉一次拿结果
-    if(!autoRetried && accs.some(a=>!a.balance||!a.balance.at)){autoRetried=true;setTimeout(load,6000)}
+    ACCOUNTS=(d.accounts||[]).map(a=>({...a}));
+    renderSummary();renderGrid();
+    await Promise.all(ACCOUNTS.map(a=>fillOne(a,false)));
+    renderSummary();renderGrid();
+    // 余额是后台刷新的：第一次打开触发，6 秒后再拉一次拿结果
+    if(!autoRetried && ACCOUNTS.some(a=>!a.balance||!a.balance.at)){autoRetried=true;setTimeout(load,6000)}
   }catch(e){showErr(e.message)}
   finally{btn.disabled=false}
 }
+
+document.getElementById("grid").addEventListener("click",async e=>{
+  const el=e.target.closest("[data-id]");if(!el)return;
+  const a=ACCOUNTS.find(x=>x.auth_index===el.getAttribute("data-id"));if(!a)return;
+  el.style.opacity=.55;
+  await fillOne(a,true);
+  renderSummary();renderGrid();
+});
+
 function openImport(){const m=document.getElementById("importModal");m.classList.remove("hidden");m.classList.add("flex")}
 function closeImport(){const m=document.getElementById("importModal");m.classList.add("hidden");m.classList.remove("flex");document.getElementById("importErr").classList.add("hidden")}
 async function doImport(){

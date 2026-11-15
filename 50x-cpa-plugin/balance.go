@@ -41,6 +41,9 @@ func balanceFor(sa *storedAuth, force bool) balanceSnap {
 	if sa == nil {
 		return balanceSnap{}
 	}
+	if force {
+		return balanceForced(sa)
+	}
 	uid := sa.Account.UID
 	balanceState.Lock()
 	snap := balanceState.m[uid]
@@ -66,6 +69,27 @@ func balanceFor(sa *storedAuth, force bool) balanceSnap {
 		}()
 	}
 	return snap
+}
+
+// balanceForced refreshes inline: the panel only sets force on an explicit card
+// click, so waiting up to balanceFetch is fine and gives a truthful number.
+var balanceForceMu sync.Mutex
+
+func balanceForced(sa *storedAuth) balanceSnap {
+	balanceForceMu.Lock()
+	defer balanceForceMu.Unlock()
+	uid := sa.Account.UID
+	balanceState.Lock()
+	snap := balanceState.m[uid]
+	balanceState.Unlock()
+	if snap.At > 0 && time.Since(time.Unix(snap.At, 0)) < 3*time.Second {
+		return snap
+	}
+	out := fetchBalance(sa)
+	balanceState.Lock()
+	balanceState.m[uid] = out
+	balanceState.Unlock()
+	return out
 }
 
 func fetchBalance(sa *storedAuth) balanceSnap {
