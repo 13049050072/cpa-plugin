@@ -76,26 +76,41 @@ func applyBalancePolicy(sa *storedAuth, snap balanceSnap) {
 	autoDisabled.Lock()
 	was := autoDisabled.m[uid]
 	autoDisabled.Unlock()
-	if zero == was {
+	if zero {
+		// Re-assert every refresh: a manual re-enable of a drained account
+		// must not sneak it back into the scheduler.
+		owned, err := setAuthDisabled(sa, true)
+		if err != nil {
+			return
+		}
+		autoDisabled.Lock()
+		if owned {
+			autoDisabled.m[uid] = true
+		} else {
+			delete(autoDisabled.m, uid)
+		}
+		autoDisabled.Unlock()
 		return
 	}
-	if err := setAuthDisabled(sa, zero); err != nil {
+	if !was {
+		return
+	}
+	if _, err := setAuthDisabled(sa, false); err != nil {
 		return
 	}
 	autoDisabled.Lock()
-	if zero {
-		autoDisabled.m[uid] = true
-	} else {
-		delete(autoDisabled.m, uid)
-	}
+	delete(autoDisabled.m, uid)
 	autoDisabled.Unlock()
 }
 
-func setAuthDisabled(sa *storedAuth, disabled bool) error {
+// setAuthDisabled flips the auth file's disabled flag. It reports whether the
+// account is ours to manage (auto_disabled marker present) so a hand-disabled
+// account with a top-up is never re-enabled behind the user's back.
+func setAuthDisabled(sa *storedAuth, disabled bool) (auto bool, err error) {
 	name := authFileNameFor(sa)
 	files, err := hostAuthList()
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, f := range files {
 		if !strings.EqualFold(f.Name, name) {
@@ -103,25 +118,34 @@ func setAuthDisabled(sa *storedAuth, disabled bool) error {
 		}
 		raw, err := hostAuthGetJSON(f.AuthIndex)
 		if err != nil {
-			return err
+			return false, err
 		}
 		var doc map[string]any
 		if err := json.Unmarshal(raw, &doc); err != nil {
-			return err
+			return false, err
 		}
-		doc["disabled"] = disabled
+		owned := doc["auto_disabled"] == true
 		if disabled {
+			if cur, _ := doc["disabled"].(bool); cur {
+				return owned, nil
+			}
+			doc["disabled"] = true
 			doc["auto_disabled"] = true
+			owned = true
 		} else {
+			doc["disabled"] = false
 			delete(doc, "auto_disabled")
 		}
 		out, err := json.Marshal(doc)
 		if err != nil {
-			return err
+			return false, err
 		}
-		return hostAuthSaveJSON(name, out)
+		if err := hostAuthSaveJSON(name, out); err != nil {
+			return false, err
+		}
+		return owned, nil
 	}
-	return fmt.Errorf("auth file %s not found", name)
+	return false, fmt.Errorf("auth file %s not found", name)
 }
 
 func balanceFor(sa *storedAuth, force bool) balanceSnap {
