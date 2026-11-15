@@ -65,13 +65,17 @@ const (
 	authFileName  = "50x.json"
 	pluginLogoURL = "https://ai.50x.energy/favicon.png"
 	siteURL       = "https://ai.50x.energy"
-	gatewayBase   = "https://api.ai.50x.energy/v1"
-	controlBase   = "https://api.ai.50x.energy/api"
 	keyPrefix     = "sk-50x-"
 	loginTTL      = 15 * time.Minute
 )
 
 var version = "0.1.0"
+
+// Vars, not consts: tests point them at an httptest server.
+var (
+	gatewayBase = "https://api.ai.50x.energy/v1"
+	controlBase = "https://api.ai.50x.energy/api"
+)
 
 type storedAuth struct {
 	Auth    storedTokens  `json:"auth"`

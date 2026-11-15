@@ -27,6 +27,17 @@ OpenAI-compatible, so the CPA executor forwards chat-completions payloads unchan
 （控制面是 `Authorization: Token <session>`，API key 查不到账单）。session 失效时
 自动用邮箱+密码重新登录。没有这两项时余额显示 `—`，其余功能不受影响。
 
+## 503 / 并发
+
+50x 网关按 key 限流：同一个 key 上第二个并发请求返回
+`503 {"code":"gateway_overloaded"}`，高峰期边缘还会直接 502。
+
+- 插件按 key 排队：同一个 key 同时只发一个请求；
+- 429/502/503/504 在**开流之前**重试 3 次（0.8s、1.6s 退避）；
+- 仍失败时返回明确错误 `upstream 503: …`，不再是
+  `upstream stream closed before any chunk carried finish_reason`
+  （那是 CPA 在流没有 finish_reason 就结束时的兜底报错）。
+
 ## 余额为 0 自动停用
 
 每次拉余额（面板加载、点卡片刷新、10 分钟后台刷新）都会检查 `balance_usd`：

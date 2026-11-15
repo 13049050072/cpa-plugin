@@ -3,12 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -22,6 +23,54 @@ type executorRequestWire struct {
 type streamResponse struct {
 	Headers http.Header                     `json:"headers,omitempty"`
 	Chunks  []pluginapi.ExecutorStreamChunk `json:"chunks,omitempty"`
+}
+
+// 50x sheds load per key: a second in-flight request on the same credential
+// gets 503 {"code":"gateway_overloaded"} and CPA also cools that credential
+// down for a minute, so requests are queued per key instead of racing. Errors
+// are returned before a stream opens, which keeps the 503 retryable by CPA.
+var keySlots sync.Map // uid -> chan struct{} (capacity 1)
+
+// The 50x edge itself sheds with 502/503 under load. CPA does not retry a
+// failed plugin Execute on another credential, so retry here, with backoff,
+// while the request has not produced a byte yet.
+const execAttempts = 3
+
+func retryableStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+func retryBackoff(attempt int) {
+	d := time.Duration(800<<uint(attempt)) * time.Millisecond
+	select {
+	case <-time.After(d):
+	case <-bgCtx.Done():
+	}
+}
+
+func lockKey(uid string) (release func(), ok bool) {
+	v, _ := keySlots.LoadOrStore(uid, make(chan struct{}, 1))
+	ch := v.(chan struct{})
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, true
+	case <-bgCtx.Done():
+		return nil, false
+	}
+}
+
+func newChatRequest(body []byte, token string) (*http.Request, error) {
+	httpReq, err := http.NewRequest(http.MethodPost, gatewayBase+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	return httpReq, nil
 }
 
 func handleExecExecute(raw []byte) ([]byte, error) {
@@ -38,23 +87,40 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		body = req.OriginalRequest
 	}
 	body = rewriteModel(body, req.Model, false)
-	bump(sa.Account.UID)
-	httpReq, err := http.NewRequest(http.MethodPost, gatewayBase+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	uid := sa.Account.UID
+	release, ok := lockKey(uid)
+	if !ok {
+		return nil, fmt.Errorf("shutting down")
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := hostHTTPDoWithCallback(httpReq, req.HostCallbackID)
-	if err != nil {
-		bumpError(sa.Account.UID)
-		return nil, fmt.Errorf("http_error: %w", err)
+	defer release()
+	bump(uid)
+	var resp *hostHTTPResponse
+	for attempt := 0; attempt < execAttempts; attempt++ {
+		if attempt > 0 {
+			retryBackoff(attempt - 1)
+		}
+		httpReq, errReq := newChatRequest(body, sa.Auth.AccessToken)
+		if errReq != nil {
+			return nil, errReq
+		}
+		resp, err = hostHTTPDoWithCallback(httpReq, req.HostCallbackID)
+		if err != nil {
+			if attempt < execAttempts-1 {
+				continue
+			}
+			bumpError(uid)
+			return nil, fmt.Errorf("http_error: %w", err)
+		}
+		if retryableStatus(resp.StatusCode) && attempt < execAttempts-1 {
+			continue
+		}
+		break
 	}
 	if resp.StatusCode >= 400 {
-		bumpError(sa.Account.UID)
+		bumpError(uid)
 		return errorEnvelopeWithStatus("http_error", upstreamMessage(resp.StatusCode, resp.Body), resp.StatusCode), nil
 	}
-	addTokens(sa.Account.UID, tokensFromBody(resp.Body))
+	addTokens(uid, tokensFromBody(resp.Body))
 	return okEnvelope(pluginapi.ExecutorResponse{Payload: resp.Body})
 }
 
@@ -72,60 +138,84 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		body = req.OriginalRequest
 	}
 	body = rewriteModel(body, req.Model, true)
-	bump(sa.Account.UID)
+	uid := sa.Account.UID
+	release, ok := lockKey(uid)
+	if !ok {
+		return nil, fmt.Errorf("shutting down")
+	}
+	bump(uid)
 	prefix := streamPrefix(req)
 	headers := http.Header{}
 	headers.Set("Content-Type", "text/event-stream")
 	headers.Set("Cache-Control", "no-cache")
 
-	httpReq, err := http.NewRequest(http.MethodPost, gatewayBase+"/chat/completions", bytes.NewReader(body))
+	// Open upstream before handing a stream back: a 503 must surface as a
+	// failed Execute so the request can be retried on another credential.
+	stream, status, err := openUpstreamStream(body, sa.Auth.AccessToken, req.HostCallbackID)
 	if err != nil {
+		release()
+		bumpError(uid)
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
-	httpReq.Header.Set("Content-Type", "application/json")
-	// 50x's DRF layer only negotiates */* or application/json; an explicit
-	// text/event-stream Accept is rejected with 406 before the stream starts.
-	httpReq.Header.Set("Accept", "*/*")
+	if status >= 400 {
+		defer stream.Close()
+		release()
+		bumpError(uid)
+		payload, _ := io.ReadAll(newHostStreamReader(stream))
+		return errorEnvelopeWithStatus("http_error", upstreamMessage(status, payload), status), nil
+	}
 
 	if req.StreamID == "" {
-		stream, status, _, err := hostHTTPDoStreamWithCallback(httpReq, req.HostCallbackID)
-		if err != nil {
-			return nil, err
-		}
 		defer stream.Close()
-		if status >= 400 {
-			bumpError(sa.Account.UID)
-			payload, _ := io.ReadAll(newHostStreamReader(stream))
-			return errorEnvelopeWithStatus("http_error", upstreamMessage(status, payload), status), nil
-		}
+		defer release()
 		payload, _ := io.ReadAll(newHostStreamReader(stream))
-		addTokens(sa.Account.UID, tokensFromStream(bytes.Split(payload, []byte("\n"))))
+		addTokens(uid, tokensFromStream(bytes.Split(payload, []byte("\n"))))
 		return okEnvelope(streamResponse{Headers: headers, Chunks: streamChunksFromPayload(payload, prefix)})
 	}
 
-	ctx, cancel := context.WithCancel(bgCtx)
-	httpReq = httpReq.WithContext(ctx)
+	// The key stays locked until the stream is drained: the upstream call is
+	// still in flight for the whole answer.
 	bgWG.Add(1)
-	go pumpStream(httpReq, cancel, req.StreamID, req.HostCallbackID, sa.Account.UID, prefix)
+	go pumpStream(stream, release, req.StreamID, uid, prefix)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 
-func pumpStream(httpReq *http.Request, cancel context.CancelFunc, streamID, callbackID, uid, prefix string) {
+func openUpstreamStream(body []byte, token, callbackID string) (*hostHTTPStream, int, error) {
+	var stream *hostHTTPStream
+	var status int
+	for attempt := 0; attempt < execAttempts; attempt++ {
+		if attempt > 0 {
+			retryBackoff(attempt - 1)
+		}
+		httpReq, err := newChatRequest(body, token)
+		if err != nil {
+			return nil, 0, err
+		}
+		// 50x's DRF layer only negotiates */* or application/json; an explicit
+		// text/event-stream Accept is rejected with 406 before the stream starts.
+		httpReq.Header.Set("Accept", "*/*")
+		var errDo error
+		stream, status, _, errDo = hostHTTPDoStreamWithCallback(httpReq, callbackID)
+		if errDo != nil {
+			if attempt < execAttempts-1 {
+				continue
+			}
+			return nil, 0, errDo
+		}
+		if retryableStatus(status) && attempt < execAttempts-1 {
+			stream.Close()
+			continue
+		}
+		break
+	}
+	return stream, status, nil
+}
+
+func pumpStream(stream *hostHTTPStream, release func(), streamID, uid, prefix string) {
 	defer bgWG.Done()
-	defer cancel()
+	defer release()
 	defer streamClose(streamID)
-	stream, status, _, err := hostHTTPDoStreamWithCallback(httpReq, callbackID)
-	if err != nil {
-		streamEmitError(streamID, err.Error())
-		return
-	}
 	defer stream.Close()
-	if status >= 400 {
-		payload, _ := io.ReadAll(newHostStreamReader(stream))
-		streamEmitError(streamID, upstreamMessage(status, payload))
-		return
-	}
 	sc := bufio.NewScanner(newHostStreamReader(stream))
 	sc.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var last usageBlock

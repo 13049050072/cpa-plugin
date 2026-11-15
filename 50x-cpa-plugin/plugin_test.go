@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -340,5 +344,113 @@ func TestApplyBalancePolicyTracksAutoDisabled(t *testing.T) {
 	applyBalancePolicy(sa, balanceSnap{BalanceUSD: ""})
 	if len(autoDisabled.m) != 0 {
 		t.Fatalf("policy touched state on error/empty: %#v", autoDisabled.m)
+	}
+}
+
+func TestExecuteRetriesLoadShed(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"gateway_overloaded"}}`))
+	}))
+	defer srv.Close()
+	old := gatewayBase
+	gatewayBase = srv.URL
+	defer func() { gatewayBase = old }()
+
+	body, err := handleExecExecute(mustJSON(executorRequestWire{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Model:       "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+			Payload:     []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`),
+			StorageJSON: []byte(`{"auth":{"accessToken":"sk-50x-test"},"account":{"uid":"u-shed"}}`),
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	_ = json.Unmarshal(body, &env)
+	if env.OK || env.Error == nil || !strings.Contains(env.Error.Message, "gateway_overloaded") {
+		t.Fatalf("env %s", body)
+	}
+	if env.Error.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", env.Error.HTTPStatus)
+	}
+	if hits != execAttempts {
+		t.Fatalf("hits = %d, want %d", hits, execAttempts)
+	}
+}
+
+func TestExecuteSerializesPerKey(t *testing.T) {
+	var cur, peak int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&cur, 1)
+		for {
+			old := atomic.LoadInt32(&peak)
+			if n <= old || atomic.CompareAndSwapInt32(&peak, old, n) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		atomic.AddInt32(&cur, -1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x"}`))
+	}))
+	defer srv.Close()
+	old := gatewayBase
+	gatewayBase = srv.URL
+	defer func() { gatewayBase = old }()
+
+	req := mustJSON(executorRequestWire{ExecutorRequest: pluginapi.ExecutorRequest{
+		Model:       "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+		Payload:     []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`),
+		StorageJSON: []byte(`{"auth":{"accessToken":"sk-50x-test"},"account":{"uid":"u-serialize"}}`),
+	}})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = handleExecExecute(req)
+		}()
+	}
+	wg.Wait()
+	if peak != 1 {
+		t.Fatalf("peak concurrency per key = %d, want 1", peak)
+	}
+}
+
+func TestExecuteRecoversOnRetry(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if hits == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html>502 Bad Gateway</html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x"}`))
+	}))
+	defer srv.Close()
+	old := gatewayBase
+	gatewayBase = srv.URL
+	defer func() { gatewayBase = old }()
+
+	body, err := handleExecExecute(mustJSON(executorRequestWire{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Model:       "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+			Payload:     []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`),
+			StorageJSON: []byte(`{"auth":{"accessToken":"sk-50x-test"},"account":{"uid":"u-retry-ok"}}`),
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	_ = json.Unmarshal(body, &env)
+	if !env.OK || hits != 2 {
+		t.Fatalf("ok=%v hits=%d body=%s", env.OK, hits, body)
 	}
 }
