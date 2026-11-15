@@ -313,5 +313,5 @@ func TestLiveBalance(t *testing.T) {
 	if snap.BalanceUSD == "" {
 		t.Fatalf("empty balance: %#v", snap)
 	}
-	t.Logf("balance=%s tokens_today=%d", snap.BalanceUSD, snap.TokensToday)
+	t.Logf("balance=%s tokens_today=%d cost_today=%s cost_7d=%s req7d=%d", snap.BalanceUSD, snap.TokensToday, snap.CostToday, snap.Cost7d, snap.Requests7d)
 }

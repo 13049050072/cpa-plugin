@@ -25,7 +25,7 @@ tailwind.config={darkMode:'class',theme:{extend:{colors:{acc:'#7c5cff'}}}};
       <h1 class="text-xl font-semibold truncate">50x</h1>
       <p class="text-xs text-stone-500 dark:text-stone-400 truncate">
         <a class="text-sky-600 dark:text-sky-400 hover:underline" href="https://ai.50x.energy/dashboard" target="_blank" rel="noreferrer">dashboard</a>
-        · 请求/token 本地统计 · 余额来自 /api/billing（点卡片刷新）
+        · 请求/token 本地统计 · 余额/花费来自 /api/billing + /api/usage（点卡片刷新）
       </p>
     </div>
     <div class="flex gap-2 shrink-0">
@@ -93,7 +93,8 @@ async function api(path,opts={},retry=true){
   return d;
 }
 function num(v){return typeof v==="number"?v.toLocaleString():"—"}
-function money(v){const n=Number(v);return isFinite(n)?"$"+n.toFixed(2):"—"}
+function money(v){const n=Number(v);return isFinite(v)&&v!==""?"$"+n.toFixed(2):"—"}
+function cost(v){const n=Number(v);if(v===undefined||v===null||v===""||!isFinite(n))return "—";if(n===0)return "$0";return "$"+n.toFixed(n<0.01?6:2)}
 function lastSeen(ts){
   if(!ts)return "—";
   const ms=Date.now()-ts*1000;
@@ -137,6 +138,10 @@ function cardHTML(a){
     <div class="mt-2 flex items-center justify-between gap-2 text-[11px] text-stone-500 min-w-0">
       <span class="truncate">最后使用 ${lastSeen(l.last)}</span>
       <span class="shrink-0 ${l.errors?'text-rose-500':''}">错误 ${num(l.errors)}</span>
+    </div>
+    <div class="mt-1 flex items-center justify-between gap-2 text-[11px] text-stone-500 min-w-0">
+      <span>今日花费 <span class="tabular-nums">${cost(b.cost_today)}</span></span>
+      <span>7 天 <span class="tabular-nums">${cost(b.cost_7d)}</span> · ${num(b.requests_7d)} 次</span>
     </div>
     ${b.error?`<p class="mt-2 text-[11px] text-rose-500 break-words line-clamp-2" title="${esc(b.error)}">${esc(b.error)}</p>`:''}
   </div>`;

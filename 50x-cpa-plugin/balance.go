@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +21,16 @@ import (
 // entries in the background.
 
 type balanceSnap struct {
-	BalanceUSD  string `json:"balance_usd,omitempty"`
-	TokensToday int64  `json:"tokens_used_today,omitempty"`
-	At          int64  `json:"at,omitempty"`
-	Err         string `json:"error,omitempty"`
+	BalanceUSD   string `json:"balance_usd,omitempty"`
+	TokensToday  int64  `json:"tokens_used_today,omitempty"`
+	CostToday    string `json:"cost_today,omitempty"`
+	Cost7d       string `json:"cost_7d,omitempty"`
+	Requests7d   int64  `json:"requests_7d,omitempty"`
+	RequestsDay  int64  `json:"requests_today,omitempty"`
+	InTokensDay  int64  `json:"in_tokens_today,omitempty"`
+	OutTokensDay int64  `json:"out_tokens_today,omitempty"`
+	At           int64  `json:"at,omitempty"`
+	Err          string `json:"error,omitempty"`
 }
 
 const (
@@ -114,7 +121,68 @@ func fetchBalance(sa *storedAuth) balanceSnap {
 	if status >= 400 {
 		return balanceSnap{At: now, Err: fmt.Sprintf("billing HTTP %d", status)}
 	}
+	// /api/usage is the only source of actual spend (cost_usd). It is best
+	// effort: a failed aggregation must not hide the balance we already have.
+	if u, err := usageWith(session); err == nil {
+		snap.CostToday, snap.Cost7d = u.costToday, u.cost7d
+		snap.RequestsDay, snap.Requests7d = u.requestsToday, u.requests7d
+		snap.InTokensDay, snap.OutTokensDay = u.inToday, u.outToday
+	}
 	return snap
+}
+
+type usageTotals struct {
+	costToday                 string
+	cost7d                    string
+	requestsToday, requests7d int64
+	inToday, outToday         int64
+}
+
+// usageWith sums /api/usage?days=7 rows: today's row plus the whole window.
+func usageWith(session string) (usageTotals, error) {
+	ctx, cancel := context.WithTimeout(bgCtx, balanceFetch)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, controlBase+"/usage?days=7", nil)
+	if err != nil {
+		return usageTotals{}, err
+	}
+	req.Header.Set("Authorization", "Token "+session)
+	resp, err := hostHTTPDoWithCallback(req, "")
+	if err != nil {
+		return usageTotals{}, err
+	}
+	if resp.StatusCode >= 400 {
+		return usageTotals{}, fmt.Errorf("usage HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		Rows []struct {
+			Date         string `json:"date"`
+			Requests     int64  `json:"requests"`
+			InputTokens  int64  `json:"input_tokens"`
+			OutputTokens int64  `json:"output_tokens"`
+			CostUSD      string `json:"cost_usd"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return usageTotals{}, err
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	var costToday, cost7d float64
+	var t usageTotals
+	for _, r := range out.Rows {
+		c, _ := strconv.ParseFloat(r.CostUSD, 64)
+		cost7d += c
+		t.requests7d += r.Requests
+		if r.Date == today {
+			costToday += c
+			t.requestsToday += r.Requests
+			t.inToday += r.InputTokens
+			t.outToday += r.OutputTokens
+		}
+	}
+	t.costToday = strconv.FormatFloat(costToday, 'f', 8, 64)
+	t.cost7d = strconv.FormatFloat(cost7d, 'f', 8, 64)
+	return t, nil
 }
 
 func billingWith(session string) (balanceSnap, int, error) {
