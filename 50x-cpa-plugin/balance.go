@@ -38,6 +38,9 @@ const (
 	balanceFetch = 12 * time.Second
 )
 
+// 50 accounts x 2 endpoints is too much for the control plane to take at once.
+var balanceSlots = make(chan struct{}, 4)
+
 var balanceState = struct {
 	sync.Mutex
 	m    map[string]balanceSnap
@@ -63,6 +66,8 @@ func balanceFor(sa *storedAuth, force bool) balanceSnap {
 		balanceState.Unlock()
 		bgWG.Add(1)
 		go func() {
+			balanceSlots <- struct{}{}
+			defer func() { <-balanceSlots }()
 			defer bgWG.Done()
 			defer func() {
 				balanceState.Lock()
@@ -85,6 +90,8 @@ var balanceForceMu sync.Mutex
 func balanceForced(sa *storedAuth) balanceSnap {
 	balanceForceMu.Lock()
 	defer balanceForceMu.Unlock()
+	balanceSlots <- struct{}{}
+	defer func() { <-balanceSlots }()
 	uid := sa.Account.UID
 	balanceState.Lock()
 	snap := balanceState.m[uid]
