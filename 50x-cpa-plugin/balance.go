@@ -47,6 +47,83 @@ var balanceState = struct {
 	busy map[string]bool
 }{m: map[string]balanceSnap{}, busy: map[string]bool{}}
 
+// A drained account must stop being scheduled. CPA skips auths marked
+// "disabled": true, and host.auth.save applies it to the running record.
+// autoDisabled remembers which accounts we switched off ourselves so a user
+// who disabled one by hand is never re-enabled here.
+var autoDisabled = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+func balanceZero(s string) (zero, ok bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return false, false
+	}
+	return v <= 0, true
+}
+
+func applyBalancePolicy(sa *storedAuth, snap balanceSnap) {
+	if sa == nil || snap.Err != "" {
+		return
+	}
+	zero, ok := balanceZero(snap.BalanceUSD)
+	if !ok {
+		return
+	}
+	uid := sa.Account.UID
+	autoDisabled.Lock()
+	was := autoDisabled.m[uid]
+	autoDisabled.Unlock()
+	if zero == was {
+		return
+	}
+	if err := setAuthDisabled(sa, zero); err != nil {
+		return
+	}
+	autoDisabled.Lock()
+	if zero {
+		autoDisabled.m[uid] = true
+	} else {
+		delete(autoDisabled.m, uid)
+	}
+	autoDisabled.Unlock()
+}
+
+func setAuthDisabled(sa *storedAuth, disabled bool) error {
+	name := authFileNameFor(sa)
+	files, err := hostAuthList()
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if !strings.EqualFold(f.Name, name) {
+			continue
+		}
+		raw, err := hostAuthGetJSON(f.AuthIndex)
+		if err != nil {
+			return err
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return err
+		}
+		doc["disabled"] = disabled
+		if disabled {
+			doc["auto_disabled"] = true
+		} else {
+			delete(doc, "auto_disabled")
+		}
+		out, err := json.Marshal(doc)
+		if err != nil {
+			return err
+		}
+		return hostAuthSaveJSON(name, out)
+	}
+	return fmt.Errorf("auth file %s not found", name)
+}
+
 func balanceFor(sa *storedAuth, force bool) balanceSnap {
 	if sa == nil {
 		return balanceSnap{}
@@ -78,6 +155,7 @@ func balanceFor(sa *storedAuth, force bool) balanceSnap {
 			balanceState.Lock()
 			balanceState.m[uid] = out
 			balanceState.Unlock()
+			applyBalancePolicy(sa, out)
 		}()
 	}
 	return snap
@@ -103,6 +181,7 @@ func balanceForced(sa *storedAuth) balanceSnap {
 	balanceState.Lock()
 	balanceState.m[uid] = out
 	balanceState.Unlock()
+	applyBalancePolicy(sa, out)
 	return out
 }
 

@@ -27,6 +27,14 @@ OpenAI-compatible, so the CPA executor forwards chat-completions payloads unchan
 （控制面是 `Authorization: Token <session>`，API key 查不到账单）。session 失效时
 自动用邮箱+密码重新登录。没有这两项时余额显示 `—`，其余功能不受影响。
 
+## 余额为 0 自动停用
+
+每次拉余额（面板加载、点卡片刷新、10 分钟后台刷新）都会检查 `balance_usd`：
+
+- `<= 0` → 把该账号 auth 文件写成 `"disabled": true`（附 `"auto_disabled": true` 标记），
+  CPA 立即停止调度它，面板显示「停用」；
+- 余额回到 0 以上 → 只恢复带 `auto_disabled` 标记的账号；手动停用的账号不受影响。
+
 ## 环境变量
 
 - `FIFTYX_HTTP_PROXY` — 可选，插件出站代理（默认直连）

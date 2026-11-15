@@ -315,3 +315,30 @@ func TestLiveBalance(t *testing.T) {
 	}
 	t.Logf("balance=%s tokens_today=%d cost_today=%s cost_7d=%s req7d=%d", snap.BalanceUSD, snap.TokensToday, snap.CostToday, snap.Cost7d, snap.Requests7d)
 }
+
+func TestBalanceZero(t *testing.T) {
+	cases := map[string]struct{ zero, ok bool }{
+		"0":             {true, true},
+		"0.000000001":   {false, true},
+		"100.000000000": {false, true},
+		"-1.5":          {true, true},
+		"":              {false, false},
+		"n/a":           {false, false},
+	}
+	for in, want := range cases {
+		zero, ok := balanceZero(in)
+		if zero != want.zero || ok != want.ok {
+			t.Fatalf("balanceZero(%q) = %v,%v want %v,%v", in, zero, ok, want.zero, want.ok)
+		}
+	}
+}
+
+func TestApplyBalancePolicyTracksAutoDisabled(t *testing.T) {
+	sa := &storedAuth{Account: storedAccount{UID: "u-policy"}}
+	// Fetch error or unparsable balance must not flip anything.
+	applyBalancePolicy(sa, balanceSnap{Err: "boom"})
+	applyBalancePolicy(sa, balanceSnap{BalanceUSD: ""})
+	if len(autoDisabled.m) != 0 {
+		t.Fatalf("policy touched state on error/empty: %#v", autoDisabled.m)
+	}
+}
