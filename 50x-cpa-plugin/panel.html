@@ -94,6 +94,8 @@ async function api(path,opts={},retry=true){
 }
 function num(v){return typeof v==="number"?v.toLocaleString():"—"}
 function money(v){const n=Number(v);return isFinite(v)&&v!==""?"$"+n.toFixed(2):"—"}
+function moneyExact(v){const n=Number(v);if(v===""||v===null||v===undefined||!isFinite(n))return "—";
+  return "$"+n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4})}
 function cost(v){const n=Number(v);if(v===undefined||v===null||v===""||!isFinite(n))return "—";if(n===0)return "$0";return "$"+n.toFixed(n<0.01?6:2)}
 function lastSeen(ts){
   if(!ts)return "—";
@@ -111,8 +113,8 @@ function badge(a){
   if(a.state==='ok')return ['可用','bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200'];
   return ['未知','bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200'];
 }
-function tile(label,value,sub,cls){
-  return `<div class="rounded-lg bg-stone-100 dark:bg-stone-900/60 p-2 min-w-0">
+function tile(label,value,sub,cls,tip){
+  return `<div class="rounded-lg bg-stone-100 dark:bg-stone-900/60 p-2 min-w-0" title="${esc(tip||'')}">
     <div class="text-[10px] text-stone-500 truncate">${esc(label)}</div>
     <div class="text-base font-semibold tabular-nums truncate ${cls||''}">${value}</div>
     <div class="text-[10px] text-stone-400 truncate">${esc(sub||'')}</div>
@@ -131,7 +133,7 @@ function cardHTML(a){
       <span class="shrink-0 max-w-[40%] truncate text-[11px] font-semibold px-2 py-0.5 rounded-full ${bcls}">${lab}</span>
     </div>
     <div class="mt-3 grid grid-cols-3 gap-2 min-w-0">
-      ${tile('余额',bal,b.at?lastSeen(b.at):'点我刷新')}
+      ${tile('余额',bal,b.at?lastSeen(b.at):'点我刷新','',b.balance_usd||'')}
       ${tile('今日请求',num(l.today),'累计 '+num(l.total))}
       ${tile('今日 Token',num(l.tokens_today),'累计 '+num(l.tokens_total))}
     </div>
@@ -158,11 +160,11 @@ function renderSummary(){
   const total=withBal.reduce((s,a)=>s+Number(a.balance.balance_usd||0),0);
   const today=ACCOUNTS.reduce((s,a)=>s+Number((a.local||{}).today||0),0);
   box.innerHTML=[
-    ['账号',ACCOUNTS.length],
-    ['可用',ok],
-    ['总余额',withBal.length?money(total):'—'],
-    ['今日请求',today.toLocaleString()],
-  ].map(([k,v])=>`<div class="rounded-lg bg-stone-100 dark:bg-stone-800 p-3 min-w-0"><div class="text-[10px] text-stone-500">${k}</div><div class="text-lg font-semibold tabular-nums truncate">${v}</div></div>`).join('');
+    ['账号',ACCOUNTS.length,ok+' 可用'],
+    ['可用',ok,ACCOUNTS.length+' 个'],
+    ['总余额',withBal.length?moneyExact(total):'—',withBal.length===ACCOUNTS.length?ACCOUNTS.length+' 个账号合计':withBal.length+'/'+ACCOUNTS.length+' 个有凭据'],
+    ['今日请求',today.toLocaleString(),'本地统计'],
+  ].map(([k,v,sub])=>`<div class="rounded-lg bg-stone-100 dark:bg-stone-800 p-3 min-w-0" title="${esc(String(total))}"><div class="text-[10px] text-stone-500">${k}</div><div class="text-lg font-semibold tabular-nums truncate">${v}</div><div class="text-[10px] text-stone-400 truncate">${esc(sub||'')}</div></div>`).join('');
 }
 
 function renderGrid(){
